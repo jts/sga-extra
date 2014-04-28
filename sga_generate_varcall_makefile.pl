@@ -1,6 +1,7 @@
 #! /usr/bin/perl
 use strict;
 use Getopt::Long;
+use POSIX;
 
 my $reads_fofn = "";
 my $base_fofn = "";
@@ -11,13 +12,18 @@ my $sga_bin = "sga";
 my $freebayes_bin = "freebayes";
 my $sga_filter_script = "sga-variant-filters.pl";
 my $bam2fastq_bin = "bam2fastq";
+my $samtools_bin = "samtools";
 my $sga_fb_merge_script = "sga_freebayes_merge.pl";
 my $vcflib = "";
-my $pp_opt = '-q 20';
-my $min_dbg_opt = 1;
+my $pp_opt = '-q 20 --discard-quality';
+my $min_dbg_opt = 2;
 my $min_count_opt = 4;
 my $k_opt = 55;
+my $dbsnp = "";
 my $project_name = "test";
+my $variant_bp_estimate = 0;
+my $base_bp_estimate = 0;
+
 my @chromosomes = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 'X', 'Y');
 
 GetOptions("project=s"        => \$project_name,
@@ -28,16 +34,23 @@ GetOptions("project=s"        => \$project_name,
            "reference-file=s" => \$reference_file,
            "sga=s"            => \$sga_bin,
            "sga-filter=s"     => \$sga_filter_script,
-           "sga-fb-merge=s"  => \$sga_fb_merge_script,
+           "sga-fb-merge=s"   => \$sga_fb_merge_script,
            "freebayes=s"      => \$freebayes_bin,
            "bam2fastq=s"      => \$bam2fastq_bin,
-           "vcflib=s"         => \$vcflib);
+           "samtools=s"       => \$samtools_bin,
+           "vcflib=s"         => \$vcflib,
+           "dbsnp=s"          => \$dbsnp,
+           "variant-bp=i"     => \$variant_bp_estimate,
+           "base-bp=i"        => \$base_bp_estimate);
 
 
 die("A reference is required (--reference)\n") if($reference_file eq "");
 
 # check prerequisites
 check_prerequisites();
+
+# determine whether chromosomes are named "chr1" or "1"
+my $chr_prefix = get_chromosome_prefix($reference_file);
 
 # write out the preamble
 print_preamble();
@@ -52,20 +65,42 @@ my $base_pp_file = "";
 
 # Set up the input filenames and write the sga preprocess rules
 if($reads_fofn ne "") {
+
     $variant_pp_file = print_input_and_preprocess_fastq("variant", $reads_fofn);
-    ($base_pp_file = print_input_and_preprocess_fastq("base", $base_fofn)) if $base_fofn ne "";
+    $base_pp_file = print_input_and_preprocess_fastq("base", $base_fofn) if($base_fofn ne "");
+
 } elsif($variant_bam ne "") {
+
     $variant_pp_file = print_input_and_preprocess_bam("variant", $variant_bam);
-    ($base_pp_file = print_input_and_preprocess_bam("base", $base_bam)) if $base_bam ne "";
+    $base_pp_file = print_input_and_preprocess_bam("base", $base_bam) if($base_bam ne "");
+
 } else {
     die("No input sources provided\n");
 }
 
+# Estimate the number of bases if it was not provided
+if($variant_bp_estimate == 0) {
+    if($reads_fofn ne "") {
+        $variant_bp_estimate = estimate_bases_from_fastq_fofn($reads_fofn);
+    } else {
+        $variant_bp_estimate = estimate_bases_from_bam($variant_bam);
+    }   
+}
+
+if($base_bp_estimate == 0) {
+    if($base_fofn ne "") {
+        $base_bp_estimate = estimate_bases_from_fastq_fofn($base_fofn);
+    } elsif($base_bam ne "") {
+        $base_bp_estimate = estimate_bases_from_bam($base_bam);
+    }
+}
+
 # write the sga index rule
-print_index();
+my $max_bp = ($variant_bp_estimate > $base_bp_estimate ? $variant_bp_estimate : $base_bp_estimate);
+print_index($max_bp);
 
 # write the graph-diff rule
-my $sga_somatic = print_graph_diff($project_name, $variant_pp_file, $base_pp_file);
+my $sga_somatic = print_graph_diff($project_name, $variant_pp_file, $base_pp_file, $variant_bp_estimate, $base_bp_estimate);
 
 # write the preqc rule
 #print_preqc();
@@ -79,11 +114,14 @@ print_separator("filtering");
 
 # write the freebayes filtering rule
 my $fb_filtered = print_freebayes_filtering($project_name, $fb_somatic, $fb_germline, 
-                          $variant_pp_file, $base_pp_file);
+                                                           $variant_pp_file, $base_pp_file,
+                                                           $variant_bp_estimate, $base_bp_estimate);
 
 my $sga_filtered = print_sga_filtering($project_name, $sga_somatic, $variant_bam, $base_bam);
 
 print_vcf_merge($project_name, $sga_filtered, $fb_filtered);
+
+exit(0);
 
 sub print_input_and_preprocess_fastq
 {
@@ -176,32 +214,38 @@ sub print_input_and_preprocess_bam
 
 sub print_index
 {
-    my $resource = get_resource_string(80, 4);
+    my($max_file_size) = @_;
+
+    # sga index in ropebwt mode uses ~0.33 bytes per input base
+    # we add an extra bit of overhead to avoid having unusual
+    # jobs fail.
+    my $max_memory = ($max_file_size * 0.4) / 1000000000;
+
+    my $resource = get_resource_string($max_memory, 4);
 
     printf("\n");
     printf("# Build an FM-index for reads\n");
     print("%.bwt: %.fastq.gz\n");
     print("\t$resource ");
-    print("\$(SGA) index -a ropebwt -t 4 --no-reverse --no-sai \$<\n");
+    print("/usr/bin/time -v \$(SGA) index -a ropebwt -t 4 --no-reverse --no-sai \$<\n");
 
-    $resource = get_resource_string(80, 8);
+    $resource = get_resource_string($max_memory, 8);
     print("%.sai: %.fastq.gz %.bwt\n");
     print("\t$resource ");
-    print("\$(SGA) gen-ssa --sai-only -t 8 \$<\n");
+    print("/usr/bin/time -v \$(SGA) gen-ssa --sai-only -t 8 \$<\n");
 }
 
 sub print_graph_diff
 {
-    my($name, $var_file, $base_file) = @_;
+    my($name, $var_file, $base_file, $var_size, $base_size) = @_;
 
-    my $memory = 64;
     my $base_opt = "";
     if($base_file ne "") {
         $base_opt = "-b $base_file";
-        $memory += 64;
     }
 
-    my $resource = get_resource_string($memory, 8);
+    my $max_memory = ($var_size + $base_size) * 0.4 / 1000000000;
+    my $resource = get_resource_string($max_memory, 8);
 
     my $gd_fmt_str = "\$(SGA) graph-diff -p $name.sga " .
                      "--min-dbg-count $min_dbg_opt -k $k_opt -x $min_count_opt ".
@@ -215,7 +259,7 @@ sub print_graph_diff
     print "\n# Make SGA calls\n";
     print "$raw_out: @var_index @base_index\n";
     print "\t$resource ";
-    print "$gd_fmt_str\n";
+    print "/usr/bin/time -v $gd_fmt_str\n";
 
     my $final_out = "$name.sga.somatic.leftalign.vcf";
     print "\n# Left align SGA calls and remove calls on unplaced chromosomes\n";
@@ -246,7 +290,7 @@ sub print_freebayes_calls
 
     print "\n# Run freebayes on each chromosome independently\n";
     print "$output_pattern:\n";
-    print "\t$resource $fb_fmt_str > \$@\n\n";
+    print "\t$resource /usr/bin/time -v $fb_fmt_str > \$@\n\n";
 
     # Make the per-chromosome file names
     my $stride = 4;
@@ -259,7 +303,7 @@ sub print_freebayes_calls
             $end = scalar(@chromosomes) - 1;
         }
         my @sub = @chromosomes[$i .. $end];
-        $chr_file_string .= join(" ", map{ sprintf($chr_vcf_fmt, $name, "chr" . $_) } @sub);
+        $chr_file_string .= join(" ", map{ sprintf($chr_vcf_fmt, $name, $chr_prefix . $_) } @sub);
     }
 
     # Merge per-chromosome calls
@@ -283,7 +327,10 @@ sub print_freebayes_calls
 
 sub print_freebayes_filtering
 {
-    my($name, $fb_somatic, $fb_germline, $var_file, $base_file) = @_;
+    my($name, $fb_somatic, $fb_germline, $var_file, $base_file, $var_size, $base_size) = @_;
+    
+    my $max_memory = ($var_size + $base_size) * 0.4 / 1000000000;
+    my $resource = get_resource_string($max_memory, 1);
 
     # Filter freebayes against the assembly graph
     my $gc_fmt_str = "\$(SGA) graph-concordance --ref \$(REFERENCE) " .
@@ -294,12 +341,10 @@ sub print_freebayes_filtering
     my @var_index = get_index_names($var_file);
     my @base_index = get_index_names($base_file);
     
-    my $resource = get_resource_string(96, 1);
-
     print "\n# Filter freebayes calls against the assembly graph\n";
     print "$out: $fb_somatic $fb_germline @var_index @base_index\n";
     print "\t$resource ";
-    print "$gc_fmt_str 2> graphfilter.err > \$@\n"; 
+    print "/usr/bin/time -v $gc_fmt_str 2> graphfilter.err > \$@\n"; 
     return $out;
 }
 
@@ -309,8 +354,11 @@ sub print_sga_filtering
 
     my $out = "$name.sga.somatic.leftalign.filters.vcf";
     print "\n# Filter SGA calls\n";
+
+    my $dbsnp_opt = ($dbsnp ne "" ? "--dbsnp $dbsnp" : "");
+
     print "$out: $sga_somatic \$(VARIANT_BAM) \$(BASE_BAM)\n";
-    print "\t$sga_filter_script --min-af 0.1 --sga $sga_somatic --tumor-bam \$(VARIANT_BAM) --normal-bam \$(BASE_BAM)\n";
+    print "\t$sga_filter_script --min-af 0.1 --samtools \$(SAMTOOLS) --sga $sga_somatic $dbsnp_opt --tumor-bam \$(VARIANT_BAM) --normal-bam \$(BASE_BAM)\n";
     return $out;
 }
 
@@ -345,6 +393,7 @@ sub print_preamble
     printf("SHELL=/bin/bash -o pipefail\n");
     printf("SGA=%s\n", $sga_bin);
     printf("FB=%s\n", $freebayes_bin);
+    printf("SAMTOOLS=%s\n", $samtools_bin);
     printf("# do not delete intermediate files\n");
     printf(".SECONDARY:\n");
 }
@@ -365,7 +414,22 @@ sub print_separator
 
 sub check_prerequisites
 {
-    print STDERR "TODO: check prereqs\n"
+    my @programs = ($sga_bin, 
+                    $freebayes_bin, 
+                    $sga_fb_merge_script, 
+                    $sga_filter_script, 
+                    "$vcflib/bin/vcfcombine",
+                    $samtools_bin,
+                 );
+
+    foreach my $program (@programs) {
+        my $ret = system("/bin/bash -c \"hash $program\"");
+        if($ret != 0) {
+            print STDERR "Could not find program $program. Please install it or update your PATH.\n";
+            print STDERR "Return: $ret\n";
+            exit(1);
+        }
+    }
 }
 
 # convert filenames reads.fastq.gz -> reads.bwt reads.sai
@@ -392,13 +456,63 @@ sub get_sample_name
     return $sample_name;
 }
 
+# 
+sub get_chromosome_prefix
+{
+    my($reference) = @_;
+    open(F, $reference) || die("Cannot open reference $reference");
+
+    # Search for chromosome 1 in file 
+    while(<F>) {
+        next unless />(\S+)/;
+        return "chr" if($1 eq "chr1");
+        return "" if($1 eq "1");
+    }
+    
+    die("Could not determine chromosome prefix");
+}
+
+# Estimate the total number of bases from a collection of fastq files
+sub estimate_bases_from_fastq_fofn
+{
+    my($fofn) = @_;
+
+    my $sum_gzipped_filesize = 0;
+    my $sum_text_filesize = 0;
+
+    open(F, $fofn) || die("Cannot open $fofn");
+    while(<F>) {
+        chomp;
+
+        $sum_text_filesize += -s $_ if(/\.fastq$/);
+        $sum_gzipped_filesize += -s $_ if(/\.fastq.gz$/);
+    }
+
+    die("Estimating size is currently only supported from gzipped fastq") if($sum_text_filesize > 0);
+
+    # Gzipped fastq compressed to approximately 1 byte per base
+    return $sum_gzipped_filesize;
+}
+
+# Estimate the total number of bases from a bam file
+sub estimate_bases_from_bam
+{
+    my($bamfile) = @_;
+
+    my $size = -s $bamfile;
+
+    # Bam requires about 1 byte/base
+    return $size;
+}
+
+
 # Make a formatted resource string for SGE
 sub get_resource_string
 {
     my($memory_gb, $threads) = @_;
 
     # Memory is requested per-thread
-    $memory_gb = ($memory_gb / $threads);
+    $memory_gb = ceil($memory_gb / $threads);
 
     my $thread_req = ($threads > 1) ? "-pe smp $threads" : "";
     return sprintf("SGE_RREQ=\"-l h_vmem=%sG -l h_stack=32M $thread_req\"", $memory_gb, $threads);
