@@ -2,6 +2,7 @@
 use strict;
 use Getopt::Long;
 use POSIX;
+use IPC::Cmd qw[can_run];
 
 my $reads_fofn = "";
 my $base_fofn = "";
@@ -9,11 +10,8 @@ my $variant_bam = "";
 my $base_bam = "";
 my $reference_file;
 my $sga_bin = "sga";
-my $freebayes_bin = "freebayes";
 my $sga_filter_script = "sga-variant-filters.pl";
-my $bam2fastq_bin = "bam2fastq";
-my $samtools_bin = "samtools";
-my $sga_fb_merge_script = "sga_freebayes_merge.pl";
+my $sga_extra_dir = "";
 my $vcflib = "";
 my $pp_opt = '-q 20 --discard-quality';
 my $min_dbg_opt = 2;
@@ -34,17 +32,23 @@ GetOptions("project=s"        => \$project_name,
            "reference-file=s" => \$reference_file,
            "sga=s"            => \$sga_bin,
            "sga-filter=s"     => \$sga_filter_script,
-           "sga-fb-merge=s"   => \$sga_fb_merge_script,
-           "freebayes=s"      => \$freebayes_bin,
-           "bam2fastq=s"      => \$bam2fastq_bin,
-           "samtools=s"       => \$samtools_bin,
-           "vcflib=s"         => \$vcflib,
+           "sga-extra-dir=s"  => \$sga_extra_dir,
            "dbsnp=s"          => \$dbsnp,
            "variant-bp=i"     => \$variant_bp_estimate,
            "base-bp=i"        => \$base_bp_estimate);
 
 
 die("A reference is required (--reference)\n") if($reference_file eq "");
+
+die("--sga-extra-dir must be provided\n") if($sga_extra_dir eq "");
+
+# Set paths to executable
+my $samtools_bin = "$sga_extra_dir/samtools/samtools";
+my $freebayes_bin = "$sga_extra_dir/freebayes/bin/freebayes";
+my $bam2fastq_bin = "$sga_extra_dir/bam2fastq/bam2fastq";
+my $sga_fb_merge_script = "$sga_extra_dir/sga_freebayes_merge.pl";
+my $bcftools_bin = "$sga_extra_dir/bcftools/bcftools";
+my $vcflib_bin_path = "$sga_extra_dir/vcflib/bin/";
 
 # check prerequisites
 check_prerequisites();
@@ -264,7 +268,7 @@ sub print_graph_diff
     my $final_out = "$name.sga.somatic.leftalign.vcf";
     print "\n# Left align SGA calls and remove calls on unplaced chromosomes\n";
     print "$final_out: $raw_out\n";
-    print "\t$vcflib/vcfleftalign -r \$(REFERENCE) \$< | awk '\$\$1 ~ /#/ || \$\$1 !~ /hs37d5/'> \$@\n";
+    print "\t$bcftools_bin norm -f \$(REFERENCE) \$< | awk '\$\$1 ~ /#/ || \$\$1 !~ /hs37d5/'> \$@\n";
 
     return $final_out;
 }
@@ -310,7 +314,7 @@ sub print_freebayes_calls
     print "FREEBAYES_PER_CHR=" . $chr_file_string . "\n";
     print "\n# Merge freebayes calls and tag with somatic status\n";
     print "$name.freebayes.allchr.vcf: \$(FREEBAYES_PER_CHR)\n";
-    print "\t$vcflib/vcfcombine \$^ |  $vcflib/vcfbreakmulti | $vcflib/vcfsamplediff -s VT $base_sample_name $var_sample_name - > \$@\n";
+    print "\t$vcflib_bin_path/vcfcombine \$^ | $vcflib_bin_path/vcfbreakmulti | $vcflib_bin_path/vcfsamplediff -s VT $base_sample_name $var_sample_name - > \$@\n";
 
     # Split calls
     my $fb_somatic = "$name.freebayes.allchr.somatic.vcf";
@@ -358,7 +362,7 @@ sub print_sga_filtering
     my $dbsnp_opt = ($dbsnp ne "" ? "--dbsnp $dbsnp" : "");
 
     print "$out: $sga_somatic \$(VARIANT_BAM) \$(BASE_BAM)\n";
-    print "\t$sga_filter_script --min-af 0.1 --samtools \$(SAMTOOLS) --sga $sga_somatic $dbsnp_opt --tumor-bam \$(VARIANT_BAM) --normal-bam \$(BASE_BAM)\n";
+    print "\t$sga_filter_script --min-af 0.1 --extra $sga_extra_dir --samtools \$(SAMTOOLS) --sga $sga_somatic $dbsnp_opt --tumor-bam \$(VARIANT_BAM) --normal-bam \$(BASE_BAM)\n";
     return $out;
 }
 
@@ -415,18 +419,16 @@ sub print_separator
 sub check_prerequisites
 {
     my @programs = ($sga_bin, 
-                    $freebayes_bin, 
+                    $freebayes_bin,
                     $sga_fb_merge_script, 
-                    $sga_filter_script, 
-                    "$vcflib/bin/vcfcombine",
+                    "$vcflib_bin_path/vcfcombine",
+                    $bcftools_bin,
                     $samtools_bin,
                  );
 
     foreach my $program (@programs) {
-        my $ret = system("/bin/bash -c \"hash $program\"");
-        if($ret != 0) {
+        if(!can_run($program)) {
             print STDERR "Could not find program $program. Please install it or update your PATH.\n";
-            print STDERR "Return: $ret\n";
             exit(1);
         }
     }
