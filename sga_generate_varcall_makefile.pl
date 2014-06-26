@@ -3,6 +3,7 @@ use strict;
 use Getopt::Long;
 use POSIX;
 use IPC::Cmd qw[can_run];
+use File::Basename;
 
 my $reads_fofn = "";
 my $base_fofn = "";
@@ -10,7 +11,6 @@ my $variant_bam = "";
 my $base_bam = "";
 my $reference_file;
 my $sga_bin = "sga";
-my $sga_filter_script = "sga-variant-filters.pl";
 my $sga_extra_dir = "";
 my $vcflib = "";
 my $pp_opt = '-q 20 --discard-quality';
@@ -31,7 +31,6 @@ GetOptions("project=s"        => \$project_name,
            "base-bam=s"       => \$base_bam,
            "reference-file=s" => \$reference_file,
            "sga=s"            => \$sga_bin,
-           "sga-filter=s"     => \$sga_filter_script,
            "sga-extra-dir=s"  => \$sga_extra_dir,
            "dbsnp=s"          => \$dbsnp,
            "variant-bp=i"     => \$variant_bp_estimate,
@@ -46,6 +45,7 @@ die("--sga-extra-dir must be provided\n") if($sga_extra_dir eq "");
 my $samtools_bin = "$sga_extra_dir/samtools/samtools";
 my $freebayes_bin = "$sga_extra_dir/freebayes/bin/freebayes";
 my $bam2fastq_bin = "$sga_extra_dir/bam2fastq/bam2fastq";
+my $sga_dbsnp_script = "$sga_extra_dir/sga-dbsnp-filter.pl";
 my $sga_fb_merge_script = "$sga_extra_dir/sga_freebayes_merge.pl";
 my $bcftools_bin = "$sga_extra_dir/bcftools/bcftools";
 my $vcflib_bin_path = "$sga_extra_dir/vcflib/bin/";
@@ -117,13 +117,18 @@ my($fb_somatic, $fb_germline) = print_freebayes_calls($project_name, $variant_ba
 print_separator("filtering");
 
 # write the freebayes filtering rule
-my $fb_filtered = print_freebayes_filtering($project_name, $fb_somatic, $fb_germline, 
-                                                           $variant_pp_file, $base_pp_file,
-                                                           $variant_bp_estimate, $base_bp_estimate);
+my $fb_graph_filtered = print_freebayes_filtering($project_name, $fb_somatic, $fb_germline, 
+                                                  $variant_pp_file, $base_pp_file,
+                                                  $variant_bp_estimate, $base_bp_estimate);
 
-my $sga_filtered = print_sga_filtering($project_name, $sga_somatic, $variant_bam, $base_bam);
 
-print_vcf_merge($project_name, $sga_filtered, $fb_filtered);
+print_variant_postprocess($project_name);
+
+my $variant_suffix = ".leftalign.filters.dbsnp.vcf";
+my $sga_filters = basename($sga_somatic, ".vcf") . $variant_suffix;
+my $fb_filters = basename($fb_graph_filtered, ".vcf") . $variant_suffix;
+
+print_vcf_merge($project_name, $sga_filters, $fb_filters);
 
 exit(0);
 
@@ -258,19 +263,14 @@ sub print_graph_diff
     my @var_index = get_index_names($var_file);
     my @base_index = get_index_names($base_file);
     
-    my $raw_out = "$name.sga.calls.vcf";
+    my $sga_out = "$name.sga.calls.vcf";
 
     print "\n# Make SGA calls\n";
-    print "$raw_out: @var_index @base_index\n";
+    print "$sga_out: @var_index @base_index\n";
     print "\t$resource ";
     print "/usr/bin/time -v $gd_fmt_str\n";
 
-    my $final_out = "$name.sga.somatic.leftalign.vcf";
-    print "\n# Left align SGA calls and remove calls on unplaced chromosomes\n";
-    print "$final_out: $raw_out\n";
-    print "\t$bcftools_bin norm -f \$(REFERENCE) \$< | awk '\$\$1 ~ /#/ || \$\$1 !~ /hs37d5/'> \$@\n";
-
-    return $final_out;
+    return $sga_out;
 }
 
 sub print_freebayes_calls
@@ -278,7 +278,7 @@ sub print_freebayes_calls
     my($name, $var_bam, $base_bam) = @_;
     
     # The structure of the file names
-    my $chr_vcf_fmt = "%s.freebayes.%s.vcf";
+    my $chr_vcf_fmt = "%s.freebayes.%s.calls.vcf";
 
     # Extract the sample names from the bam
     my $var_sample_name = get_sample_name($var_bam);
@@ -290,7 +290,7 @@ sub print_freebayes_calls
     my $output_pattern = sprintf($chr_vcf_fmt, $name, "%");
     
     my $fb_fmt_str = "\$(FB) -r \$* -f \$(REFERENCE) --pooled-discrete --pooled-continuous " .
-                     "--min-alternate-fraction 0.1 --genotype-qualities \$(VARIANT_BAM) \$(BASE_BAM)";
+                     "--min-alternate-fraction 0.1 --allele-balance-priors-off --genotype-qualities \$(VARIANT_BAM) \$(BASE_BAM)";
 
     print "\n# Run freebayes on each chromosome independently\n";
     print "$output_pattern:\n";
@@ -334,7 +334,7 @@ sub print_freebayes_filtering
     my($name, $fb_somatic, $fb_germline, $var_file, $base_file, $var_size, $base_size) = @_;
     
     my $max_memory = ($var_size + $base_size) * 0.4 / 1000000000;
-    my $resource = get_resource_string($max_memory, 1);
+    my $resource = get_resource_string($max_memory, 8);
 
     # Filter freebayes against the assembly graph
     my $gc_fmt_str = "\$(SGA) graph-concordance --ref \$(REFERENCE) " .
@@ -352,18 +352,27 @@ sub print_freebayes_filtering
     return $out;
 }
 
-sub print_sga_filtering
+sub print_variant_postprocess
 {
-    my($name, $sga_somatic, $var_bam, $base_bam) = @_;
+    my($name) = @_;
 
-    my $out = "$name.sga.somatic.leftalign.filters.vcf";
-    print "\n# Filter SGA calls\n";
+    print "\n# Left align SGA calls and remove calls on unplaced chromosomes\n";
+    print "%.leftalign.vcf: %.vcf\n";
+    print "\t$bcftools_bin norm -f \$(REFERENCE) \$< | awk '\$\$1 ~ /#/ || \$\$1 !~ /hs37d5/'> \$@\n";
 
-    my $dbsnp_opt = ($dbsnp ne "" ? "--dbsnp $dbsnp" : "");
+    print "\n# Filter calls\n";
+    my $max_memory = 16;
+    my $resource = get_resource_string($max_memory, 1);
 
-    print "$out: $sga_somatic \$(VARIANT_BAM) \$(BASE_BAM)\n";
-    print "\t$sga_filter_script --min-af 0.1 --extra $sga_extra_dir --samtools \$(SAMTOOLS) --sga $sga_somatic $dbsnp_opt --tumor-bam \$(VARIANT_BAM) --normal-bam \$(BASE_BAM)\n";
-    return $out;
+    my $filter_str = "--min-var-dp 4 --min-af 0.1";
+
+    print "%.filters.vcf: %.vcf \$(VARIANT_BAM) \$(BASE_BAM)\n";
+    print "\t$resource ";
+    print "\t\$(SGA) somatic-variant-filters $filter_str --tumor \$(VARIANT_BAM) --normal \$(BASE_BAM) --reference \$(REFERENCE) \$< > \$@\n";
+
+    print "\n# Mark dbSNP variants\n";
+    print "%.dbsnp.vcf: %.vcf\n";
+    print "\t$sga_dbsnp_script --extra $sga_extra_dir --dbsnp $dbsnp \$< > \$@\n";
 }
 
 # Merge the results of sga and freebayes
@@ -450,10 +459,10 @@ sub get_sample_name
     my $sample_name = "";
     open(F, "samtools view -H $bam_file |");
     while(<F>) {
-        next unless /SM:(\S+)/;
+        next unless /^\@RG.*SM:(\S+)/;
 
         $sample_name = $1 if($sample_name eq "");
-        die("Error: multiple sample names in bam file $bam_file") if($1 ne $sample_name);
+        die("Error: multiple sample names in bam file $bam_file ($1 != $sample_name)") if($1 ne $sample_name);
     }
     return $sample_name;
 }

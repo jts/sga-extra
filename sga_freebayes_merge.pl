@@ -7,6 +7,8 @@ my $sga = "";
 my $freebayes = "";
 my $min_quality = 30;
 
+GetOptions("min-quality=i" => \$min_quality);
+
 my @files = @ARGV;
 my @callers = ("sga", "freebayes");
 
