@@ -210,13 +210,15 @@ sub print_input_and_preprocess_bam
     die("No bam provided") if $bam eq "";
 
     my $outfile = "$name.fastq.gz";
+    
+    my $resource = get_resource_string(32, 1);
 
     printf("\n");
     printf("# Preprocess the $name input bam files\n");
     printf("%s:\n", $outfile);
     printf("\trm -f \$@\n\n");
 
-    my $pp_str = "\t$bam2fastq_bin --pairs-to-stdout $bam | \$(SGA) preprocess --pe-mode 2 - | gzip >> \$@";
+    my $pp_str = "\t$resource $bam2fastq_bin --pairs-to-stdout $bam | \$(SGA) preprocess --pe-mode 2 - | gzip >> \$@";
     printf "$pp_str\n";
     return $outfile;
 }
@@ -409,6 +411,8 @@ sub print_preamble
     printf("SAMTOOLS=%s\n", $samtools_bin);
     printf("# do not delete intermediate files\n");
     printf(".SECONDARY:\n");
+    printf("# delete files when a command fails\n");
+    printf(".DELETE_ON_ERROR:\n");
 }
 
 sub print_filepaths
@@ -509,10 +513,24 @@ sub estimate_bases_from_fastq_fofn
 sub estimate_bases_from_bam
 {
     my($bamfile) = @_;
+    my $size = 0;
+    my $read_length = 100;
 
-    my $size = -s $bamfile;
+    # Run samtools idxstats on the file to count the number of reads
+    if(open(P, "$samtools_bin idxstats $bamfile|")) {
+        my $total_reads = 0;
+        while(<P>) {
+            chomp;
+            my @f = split;
+            $total_reads += ($f[2] + $f[3]);
+        }
+        $size = $total_reads * $read_length;
+    } else {
+        # If idxstats fails then just estimate by the filesize
+        # Bam requires about 1 byte/base
+        $size = -s $bamfile;
+    }
 
-    # Bam requires about 1 byte/base
     return $size;
 }
 
