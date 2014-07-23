@@ -6,8 +6,10 @@ use Getopt::Long;
 my $sga = "";
 my $freebayes = "";
 my $min_quality = 30;
+my $fb_snv_only = 0;
 
-GetOptions("min-quality=i" => \$min_quality);
+GetOptions("min-quality=i" => \$min_quality,
+           "fb-snv-only" => \$fb_snv_only);
 
 my @files = @ARGV;
 my @callers = ("sga", "freebayes");
@@ -113,15 +115,15 @@ sub loadVCF
 
         # Hard filter freebayes calls
         if($is_freebayes) {
-            my $not_snv = length($ref) > 1 || length($alt) > 1;
+            my $skip_non_snv = (length($ref) > 1 || length($alt)) > 1 && $fb_snv_only;
             my $is_low_quality = $fields[5] < $min_quality;
             my $not_graph_somatic = (index($fields[7], "KmerClassification=SOMATIC") == -1);
 
-            $n_not_snv += $not_snv;
+            $n_not_snv += $skip_non_snv;
             $n_lq += $is_low_quality;
             $n_graph_fail += $not_graph_somatic;
 
-            next if $not_snv || $is_low_quality || $not_graph_somatic;
+            next if $skip_non_snv || $is_low_quality || $not_graph_somatic;
         }
 
         my $tags = $fields[7];
