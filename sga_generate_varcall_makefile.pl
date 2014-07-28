@@ -22,6 +22,12 @@ my $project_name = "test";
 my $variant_bp_estimate = 0;
 my $base_bp_estimate = 0;
 
+# Memory allocation constants
+my $bam2fastq_mem_gb = 64;
+my $ropebwt_factor = 0.55;
+my $graphdiff_factor = 0.4;
+my $graphfilter_factor = 0.45;
+
 my @chromosomes = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 'X', 'Y');
 
 GetOptions("project=s"        => \$project_name,
@@ -211,7 +217,7 @@ sub print_input_and_preprocess_bam
 
     my $outfile = "$name.fastq.gz";
     
-    my $resource = get_resource_string(32, 1);
+    my $resource = get_resource_string($bam2fastq_mem_gb, 1);
 
     printf("\n");
     printf("# Preprocess the $name input bam files\n");
@@ -230,7 +236,7 @@ sub print_index
     # sga index in ropebwt mode uses ~0.33 bytes per input base
     # we add an extra bit of overhead to avoid having unusual
     # jobs fail.
-    my $max_memory = ($max_file_size * 0.4) / 1000000000;
+    my $max_memory = ($max_file_size * $ropebwt_factor) / 1000000000;
 
     my $resource = get_resource_string($max_memory, 4);
 
@@ -255,7 +261,7 @@ sub print_graph_diff
         $base_opt = "-b $base_file";
     }
 
-    my $max_memory = ($var_size + $base_size) * 0.4 / 1000000000;
+    my $max_memory = ($var_size + $base_size) * $graphdiff_factor / 1000000000;
     my $resource = get_resource_string($max_memory, 8);
 
     my $gd_fmt_str = "\$(SGA) graph-diff -p $name.sga " .
@@ -335,7 +341,7 @@ sub print_freebayes_filtering
 {
     my($name, $fb_somatic, $fb_germline, $var_file, $base_file, $var_size, $base_size) = @_;
     
-    my $max_memory = ($var_size + $base_size) * 0.4 / 1000000000;
+    my $max_memory = ($var_size + $base_size) * $graphfilter_factor / 1000000000;
     my $resource = get_resource_string($max_memory, 8);
 
     # Filter freebayes against the assembly graph
@@ -358,19 +364,19 @@ sub print_variant_postprocess
 {
     my($name) = @_;
 
-    print "\n# Left align SGA calls and remove calls on unplaced chromosomes\n";
+    print "\n# Left align calls and remove variants on unplaced chromosomes and the mitochondria\n";
     print "%.leftalign.vcf: %.vcf\n";
-    print "\t$bcftools_bin norm -f \$(REFERENCE) \$< | awk '\$\$1 ~ /#/ || \$\$1 !~ /hs37d5/'> \$@\n";
+    print "\t$bcftools_bin norm -f \$(REFERENCE) \$< | awk '\$\$1 ~ /#/ || (\$\$1 !~ /hs37d5/ && \$\$1 !~ /GL/ && \$\$1 !~ /MT/ && \$\$1 !~ /NC/)'> \$@\n";
 
     print "\n# Filter calls\n";
     my $max_memory = 16;
-    my $resource = get_resource_string($max_memory, 1);
+    my $resource = get_resource_string($max_memory, 8);
 
     my $filter_str = "--min-var-dp 4 --min-af 0.1";
 
     print "%.filters.vcf: %.vcf \$(VARIANT_BAM) \$(BASE_BAM)\n";
     print "\t$resource ";
-    print "\t\$(SGA) somatic-variant-filters $filter_str --tumor \$(VARIANT_BAM) --normal \$(BASE_BAM) --reference \$(REFERENCE) \$< > \$@\n";
+    print "\t\$(SGA) somatic-variant-filters -t 8 $filter_str --tumor \$(VARIANT_BAM) --normal \$(BASE_BAM) --reference \$(REFERENCE) \$< > \$@\n";
 
     print "\n# Mark dbSNP variants\n";
     print "%.dbsnp.vcf: %.vcf\n";
@@ -540,6 +546,15 @@ sub get_resource_string
 {
     my($memory_gb, $threads) = @_;
 
+    # Clamp memory usage to scheduling-friendly values
+    my @clamps = (4, 8, 16, 32, 64, 96, 128, 160, 192, 256);
+    foreach my $c (@clamps) {
+        if($c > $memory_gb) {
+            $memory_gb = $c;
+            last;
+        }
+    }
+    
     # Memory is requested per-thread
     $memory_gb = ceil($memory_gb / $threads);
 
