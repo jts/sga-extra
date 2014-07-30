@@ -36,7 +36,6 @@ foreach my $f (@files) {
 }
 
 my $date = strftime "%Y%m%d", localtime;
-print $date;
 
 # print the vcf header
 print "##fileformat=VCFv4.1\n";
