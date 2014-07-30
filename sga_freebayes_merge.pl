@@ -2,6 +2,7 @@
 
 use strict;
 use Getopt::Long;
+use POSIX qw(strftime);
 
 my $sga = "";
 my $freebayes = "";
@@ -34,10 +35,13 @@ foreach my $f (@files) {
     loadVCF($f, $caller_id, $callers[$caller_id] eq "freebayes");
 }
 
+my $date = strftime "%Y%m%d", localtime;
+print $date;
+
 # print the vcf header
 print "##fileformat=VCFv4.1\n";
-print "##fileDate=20140116\n";
-print "##source=union calls from passed freebayes-snvs and all SGA calls\n";
+print "##fileDate=$date\n";
+print "##source=union calls from freebayes and SGA calls\n";
 print "##reference=/u/jsimpson/simpsonlab/data/references/hs37d5.fa\n";
 print "##FILTER=<ID=NormalEvidence,Description=\"There is evidence for the SGA call in the aligned reads.\">\n";
 print "##FILTER=<ID=dbSNP,Description=\"The variant exists in dbSNP.\">\n";
@@ -45,9 +49,15 @@ print "##FILTER=<ID=LowComplexity,Description=\"The variant falls in a region of
 print "##FILTER=<ID=Homopolymer,Description=\"The variant is in a homopolymer is length at least 7.\">\n";
 print "##FILTER=<ID=StrandBias,Description=\"The variant is not well represented by both sequencing strands.\">\n";
 print "##FILTER=<ID=NoAltEvidence,Description=\"The alignments do not have evidence of assembled variant (SNVs only).\">\n";
-print "##FILTER=<ID=LowAlleleFreq,Description=\"The variant is present in a low proportion of reads.\">\n";
+print "##FILTER=<ID=LowAlleleFrequency,Description=\"The variant is present in a low proportion of reads.\">\n";
 print "##FILTER=<ID=LowQuality,Description=\"The quality scores of the assembly variants are low.\">\n";
 print "##FILTER=<ID=LowNormalDepth,Description=\"The control sample has low depth in this region.\">\n";
+print "##FILTER=<ID=DepthLimitReached,Description=\"The sequencing depth is too deep to reliably call.\">\n";
+print "##FILTER=<ID=LowMappingQuality,Description=\"The mapping quality of reads in the region is low.\">\n";
+print "##FILTER=<ID=LowVarDP,Description=\"The variant is in few reads.\">\n";
+print "##FILTER=<ID=NormalEvidence,Description=\"There is evidence for the variant in the matched normal sample.\">\n";
+print "##FILTER=<ID=PossibleError,Description=\"The variant may be a sequencing error.\">\n";
+print "##FILTER=<ID=ShortHaplotype,Description=\"The assembled haplotype is too short to call.\">\n";
 print "##INFO=<ID=CALLER,Number=.,Type=String,Description=\"Which calling program(s) found this variant.\">\n";
 print "##INFO=<ID=VT,Number=1,Type=String,Description=\"Whether this variant is SOMATIC or GERMLINE\">\n";
 print "##INFO=<ID=TYPE,Number=A,Type=String,Description=\"The type of allele, either snp, mnp, ins, del, or complex.\">\n";
@@ -77,8 +87,14 @@ foreach my $k (keys %{$vcfHash})
     # Pass the variant if either set passed it, otherwise use the SGA status
     if($passed_in_any) {
         $out_status = "PASS";
-    } elsif(defined($status{"sga"})) {
-        $out_status = $status{"sga"};
+    } else {
+        # Merge filter reasons across callers
+        my %sh;
+        for my $s (split(";", $status{"sga"}), 
+                   split(";", $status{"freebayes"})) {
+                $sh{$s} = 1;
+        }
+        $out_status = join(";", keys %sh);
     }
     my $info = "CALLER=" . join(",", @called) . ";VT=SOMATIC";
     print join("\t", ($chr, $pos, ".", $ref, $alt, ".", $out_status, $info, "GT", "0/0", "0/1")) . "\n";
