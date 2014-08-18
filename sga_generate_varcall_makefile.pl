@@ -17,7 +17,6 @@ my $pp_opt = '-q 20 --discard-quality';
 my $min_dbg_opt = 2;
 my $min_count_opt = 4;
 my $k_opt = 55;
-my $dbsnp = "";
 my $project_name = "test";
 my $variant_bp_estimate = 0;
 my $base_bp_estimate = 0;
@@ -38,7 +37,6 @@ GetOptions("project=s"        => \$project_name,
            "reference-file=s" => \$reference_file,
            "sga=s"            => \$sga_bin,
            "sga-extra-dir=s"  => \$sga_extra_dir,
-           "dbsnp=s"          => \$dbsnp,
            "variant-bp=i"     => \$variant_bp_estimate,
            "base-bp=i"        => \$base_bp_estimate);
 
@@ -55,6 +53,7 @@ my $sga_dbsnp_script = "$sga_extra_dir/sga-dbsnp-filter.pl";
 my $sga_fb_merge_script = "$sga_extra_dir/sga_freebayes_merge.pl";
 my $bcftools_bin = "$sga_extra_dir/bcftools/bcftools";
 my $vcflib_bin_path = "$sga_extra_dir/vcflib/bin/";
+my $dbsnp = "$sga_extra_dir/dbsnp/00-All.vcf.gz";
 
 # check prerequisites
 check_prerequisites();

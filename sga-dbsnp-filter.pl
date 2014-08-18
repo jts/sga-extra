@@ -95,7 +95,6 @@ sub perform_filter
 sub load_nondbsnp_sites
 {
     my($in, $path) = @_;
-    my $out = "$in.dbsnp_filtered.vcf";
     
     # sort, bgzip and tabix the file
     system("$vcfsort_bin $in > $in.tmp.sorted.vcf");
