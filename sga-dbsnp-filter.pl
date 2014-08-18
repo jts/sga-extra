@@ -103,7 +103,7 @@ sub load_nondbsnp_sites
     system("$bcftools_bin index -f $in.tmp.sorted.vcf.gz");
     
     # find the non-dbsnp sites
-    open(SITES, "$bcftools_bin isec -C $in.tmp.sorted.vcf.gz $path |");
+    open(SITES, "$bcftools_bin isec -C $in.tmp.sorted.vcf.gz $path |") || die("bcftools isec failed");
     while(<SITES>) {
         chomp;
         my @fields = split;
