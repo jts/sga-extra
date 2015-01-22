@@ -145,7 +145,7 @@ sub load_cosmic_sites
         close(SITES);
     }
     my $nkeys = scalar keys %cosmic_sites;
-    print "$nkeys keys in cosmic hash\n";
+    print STDERR "$nkeys keys in cosmic hash\n";
 }
 
 # check that each program can be run
