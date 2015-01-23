@@ -9,10 +9,12 @@ my $freebayes = "";
 my $min_quality = 30;
 my $fb_snv_only = 0;
 my $graph_concordance = 1;
+my $fb_both_strands = 1;
 
 GetOptions("min-quality=i" => \$min_quality,
            "fb_snv-only" => \$fb_snv_only,
-           "graph_concordance!" => \$graph_concordance);
+           "graph_concordance!" => \$graph_concordance,
+           "fb_both_strands!" => \$fb_both_strands);
 
 my @files = @ARGV;
 my @callers     = ("sga", "freebayes", "strelka", "sniper", "mutect");
@@ -120,6 +122,7 @@ sub loadVCF
     my $n_lq = 0;
     my $n_graph_fail = 0;
     my $n_not_snv = 0;
+    my $n_not_both_strands = 0;
 
     while(<F>)
     {
@@ -141,6 +144,7 @@ sub loadVCF
             my $skip_non_snv = (length($ref) > 1 || length($alt)) > 1 && $fb_snv_only;
             my $is_low_quality = $quality < $min_quality;
             my $not_graph_somatic = 0;
+            my $not_both_strands = 0;
             if ($graph_concordance) {
                 $not_graph_somatic = (index($filters, "KmerClassification=SOMATIC") == -1);
             }
@@ -148,8 +152,12 @@ sub loadVCF
             $n_not_snv += $skip_non_snv;
             $n_lq += $is_low_quality;
             $n_graph_fail += $not_graph_somatic;
+            if ($fb_both_strands && ($callers[$idx] == "freebayes")) {
+                $not_both_strands = ( (index($filters, "SAF=0") > -1) || (index($filters, "SAR=0") > -1) );
+                $n_not_both_strands += $not_both_strands;
+            }
 
-            next if $skip_non_snv || $is_low_quality || $not_graph_somatic;
+            next if $skip_non_snv || $is_low_quality || $not_graph_somatic || $not_both_strands;
         }
 
         my $key = join(";", ($chr, $pos, $ref, $alt));
@@ -157,6 +165,6 @@ sub loadVCF
         $n_kept++;
     }
 
-    printf STDERR ("Caller: %s, variants: %d, kept: %d, (LQ: %d, COMPLEX: %d, GRAPH-FAIL: %d)\n", 
-        $callers[$idx], $n_read, $n_kept,  $n_lq, $n_not_snv, $n_graph_fail)
+    printf STDERR ("Caller: %s, variants: %d, kept: %d, (LQ: %d, COMPLEX: %d, GRAPH-FAIL: %d, STRAND_BIAS: %d)\n", 
+        $callers[$idx], $n_read, $n_kept,  $n_lq, $n_not_snv, $n_graph_fail, $n_not_both_strands)
 }
