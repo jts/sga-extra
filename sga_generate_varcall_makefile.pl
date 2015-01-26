@@ -67,6 +67,8 @@ print_preamble();
 # Write the input files as make variables to have shorter command lines later
 print_filepaths();
 
+printf("\nall: %s.merged.passed.vcf\n\n", $project_name);
+
 print_separator("sga calling");
 
 my $variant_pp_file = "";

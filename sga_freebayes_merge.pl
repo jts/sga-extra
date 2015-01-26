@@ -8,12 +8,17 @@ my $sga = "";
 my $freebayes = "";
 my $min_quality = 30;
 my $fb_snv_only = 0;
+my $graph_concordance = 1;
+my $fb_both_strands = 1;
 
 GetOptions("min-quality=i" => \$min_quality,
-           "fb-snv-only" => \$fb_snv_only);
+           "fb_snv-only" => \$fb_snv_only,
+           "graph_concordance!" => \$graph_concordance,
+           "fb_both_strands!" => \$fb_both_strands);
 
 my @files = @ARGV;
-my @callers = ("sga", "freebayes");
+my @callers     = ("sga", "freebayes", "strelka", "sniper", "mutect");
+my $othercaller = "";
 
 die("Exactly two VCF files must be provided") unless scalar(@files) == 2;
 
@@ -27,12 +32,15 @@ foreach my $f (@files) {
 
         if(index($f, $callers[$i]) != -1) {
             $caller_id = $i;
+            if($callers[$caller_id] ne "sga") {
+                $othercaller=$callers[$caller_id];
+            }
             last;
         }
     }
 
     die("Caller not found") if($caller_id == -1);
-    loadVCF($f, $caller_id, $callers[$caller_id] eq "freebayes");
+    loadVCF($f, $caller_id, $callers[$caller_id] eq $othercaller);
 }
 
 my $date = strftime "%Y%m%d", localtime;
@@ -40,7 +48,7 @@ my $date = strftime "%Y%m%d", localtime;
 # print the vcf header
 print "##fileformat=VCFv4.1\n";
 print "##fileDate=$date\n";
-print "##source=union calls from freebayes and SGA calls\n";
+print "##source=union calls from $othercaller and SGA calls\n";
 print "##reference=/u/jsimpson/simpsonlab/data/references/hs37d5.fa\n";
 print "##FILTER=<ID=NormalEvidence,Description=\"There is evidence for the SGA call in the aligned reads.\">\n";
 print "##FILTER=<ID=dbSNP,Description=\"The variant exists in dbSNP.\">\n";
@@ -90,7 +98,7 @@ foreach my $k (keys %{$vcfHash})
         # Merge filter reasons across callers
         my %sh;
         for my $s (split(";", $status{"sga"}), 
-                   split(";", $status{"freebayes"})) {
+                   split(";", $status{$othercaller})) {
                 $sh{$s} = 1;
         }
         $out_status = join(";", keys %sh);
@@ -101,7 +109,7 @@ foreach my $k (keys %{$vcfHash})
 
 sub loadVCF
 {
-    my($filename, $idx, $is_freebayes) = @_;
+    my($filename, $idx, $other) = @_;
 
     if ($filename =~ /\.gz$/) {
         open(F, "gunzip -c $filename |") || die "can't open pipe to $filename";
@@ -114,6 +122,7 @@ sub loadVCF
     my $n_lq = 0;
     my $n_graph_fail = 0;
     my $n_not_snv = 0;
+    my $n_not_both_strands = 0;
 
     while(<F>)
     {
@@ -127,26 +136,35 @@ sub loadVCF
         my $pos = $fields[1];
         my $ref = $fields[3];
         my $alt = $fields[4];
+        my $quality = $fields[5];
+        my $filters = $fields[7];
 
-        # Hard filter freebayes calls
-        if($is_freebayes) {
+        # Hard filter proposed calls
+        if($other) {
             my $skip_non_snv = (length($ref) > 1 || length($alt)) > 1 && $fb_snv_only;
-            my $is_low_quality = $fields[5] < $min_quality;
-            my $not_graph_somatic = (index($fields[7], "KmerClassification=SOMATIC") == -1);
+            my $is_low_quality = $quality < $min_quality;
+            my $not_graph_somatic = 0;
+            my $not_both_strands = 0;
+            if ($graph_concordance) {
+                $not_graph_somatic = (index($filters, "KmerClassification=SOMATIC") == -1);
+            }
 
             $n_not_snv += $skip_non_snv;
             $n_lq += $is_low_quality;
             $n_graph_fail += $not_graph_somatic;
+            if ($fb_both_strands && ($callers[$idx] == "freebayes")) {
+                $not_both_strands = ( (index($filters, "SAF=0") > -1) || (index($filters, "SAR=0") > -1) );
+                $n_not_both_strands += $not_both_strands;
+            }
 
-            next if $skip_non_snv || $is_low_quality || $not_graph_somatic;
+            next if $skip_non_snv || $is_low_quality || $not_graph_somatic || $not_both_strands;
         }
 
-        my $tags = $fields[7];
         my $key = join(";", ($chr, $pos, $ref, $alt));
         $vcfHash->{$key}->[$idx] = $_;
         $n_kept++;
     }
 
-    printf STDERR ("Caller: %s variants: %d kept: %d (LQ: %d COMPLEX: %d GRAPH-FAIL: %d)\n", 
-        $callers[$idx], $n_read, $n_kept,  $n_lq, $n_not_snv, $n_graph_fail)
+    printf STDERR ("Caller: %s, variants: %d, kept: %d, (LQ: %d, COMPLEX: %d, GRAPH-FAIL: %d, STRAND_BIAS: %d)\n", 
+        $callers[$idx], $n_read, $n_kept,  $n_lq, $n_not_snv, $n_graph_fail, $n_not_both_strands)
 }
